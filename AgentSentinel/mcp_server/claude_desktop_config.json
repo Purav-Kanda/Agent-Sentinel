@@ -1,0 +1,17 @@
+{
+  "_comment": "Add this block to your Claude Desktop claude_desktop_config.json to connect AgentSentinel as an MCP server.",
+  "mcpServers": {
+    "agent-sentinel": {
+      "command": "python",
+      "args": ["-m", "mcp_server.server"],
+      "cwd": "/path/to/AgentSentinel",
+      "env": {
+        "SPLUNK_HEC_URL":   "https://your-splunk:8088/services/collector",
+        "SPLUNK_HEC_TOKEN": "your-hec-token",
+        "SPLUNK_HOST":      "your-splunk",
+        "SPLUNK_USERNAME":  "admin",
+        "SPLUNK_PASSWORD":  "your-password"
+      }
+    }
+  }
+}

@@ -1,0 +1,400 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  AgentSentinel - Main Splunk Dashboard
+  ======================================
+  File: dashboard/agent_sentinel_dashboard.xml
+  Install: Copy to $SPLUNK_HOME/etc/apps/agent_sentinel/default/data/ui/views/
+
+  This dashboard gives security/ops teams a single pane of glass for
+  monitoring all AI agents running inside or connected to Splunk.
+
+  Panels:
+    1. KPI row  – active sessions, total anomalies, avg composite score
+    2. Session Health table – per-session status at a glance
+    3. Anomaly Alert Feed   – real-time stream of detected anomalies
+    4. Tool Loop Heatmap    – which tools are looping most
+    5. Hallucination Risk   – LLM calls by risk level over time
+    6. Remediation Audit    – what actions AgentSentinel took
+-->
+<dashboard version="1.1" theme="dark">
+  <label>AgentSentinel – Agentic AI Observability</label>
+  <description>
+    Real-time monitoring of AI agents running in Splunk.
+    Detects hallucinations, tool loops, reasoning drift, and cascade failures.
+  </description>
+
+  <!-- ── Global time picker ── -->
+  <fieldset submitButton="false" autoRun="true">
+    <input type="time" token="time_range" searchWhenChanged="true">
+      <label>Time Range</label>
+      <default>
+        <earliest>-1h</earliest>
+        <latest>now</latest>
+      </default>
+    </input>
+    <input type="text" token="agent_filter" searchWhenChanged="true">
+      <label>Agent ID Filter</label>
+      <default>*</default>
+    </input>
+  </fieldset>
+
+  <!-- ══════════════════════════════════════════════════════════════════════ -->
+  <!-- ROW 1: KPI Single-Value panels                                        -->
+  <!-- ══════════════════════════════════════════════════════════════════════ -->
+  <row>
+    <panel>
+      <title>Active Sessions</title>
+      <single>
+        <search>
+          <query>
+            index=agent_telemetry sourcetype=agent_sentinel
+                span_type=session_start agent_id="$agent_filter$"
+            | stats dc(session_id) AS active_sessions
+          </query>
+          <earliest>$time_range.earliest$</earliest>
+          <latest>$time_range.latest$</latest>
+        </search>
+        <option name="colorMode">block</option>
+        <option name="rangeColors">["#53a051","#f8be34","#f1813f","#dc4e41"]</option>
+        <option name="rangeValues">[0,5,10]</option>
+        <option name="useColors">true</option>
+      </single>
+    </panel>
+
+    <panel>
+      <title>Total Anomaly Alerts</title>
+      <single>
+        <search>
+          <query>
+            index=agent_telemetry sourcetype=agent_sentinel
+                span_type=anomaly_alert agent_id="$agent_filter$"
+            | stats count AS total_alerts
+          </query>
+          <earliest>$time_range.earliest$</earliest>
+          <latest>$time_range.latest$</latest>
+        </search>
+        <option name="colorMode">block</option>
+        <option name="rangeColors">["#53a051","#f8be34","#dc4e41"]</option>
+        <option name="rangeValues">[0,3]</option>
+        <option name="useColors">true</option>
+        <option name="underLabel">Since time range start</option>
+      </single>
+    </panel>
+
+    <panel>
+      <title>Avg Composite Anomaly Score</title>
+      <single>
+        <search>
+          <query>
+            index=agent_telemetry sourcetype=agent_sentinel
+                span_type=anomaly_alert agent_id="$agent_filter$"
+            | stats avg(composite_score) AS avg_score
+            | eval avg_score = round(avg_score, 3)
+          </query>
+          <earliest>$time_range.earliest$</earliest>
+          <latest>$time_range.latest$</latest>
+        </search>
+        <option name="colorMode">block</option>
+        <option name="rangeColors">["#53a051","#f8be34","#f1813f","#dc4e41"]</option>
+        <option name="rangeValues">[0,0.4,0.65]</option>
+        <option name="useColors">true</option>
+        <option name="underLabel">0.65+ triggers remediation</option>
+      </single>
+    </panel>
+
+    <panel>
+      <title>Sessions Paused by Sentinel</title>
+      <single>
+        <search>
+          <query>
+            index=agent_telemetry sourcetype=agent_sentinel
+                span_type=remediation action_taken=pause agent_id="$agent_filter$"
+            | stats dc(session_id) AS paused
+          </query>
+          <earliest>$time_range.earliest$</earliest>
+          <latest>$time_range.latest$</latest>
+        </search>
+        <option name="colorMode">block</option>
+        <option name="rangeColors">["#53a051","#f1813f","#dc4e41"]</option>
+        <option name="rangeValues">[0,1]</option>
+        <option name="useColors">true</option>
+      </single>
+    </panel>
+  </row>
+
+  <!-- ══════════════════════════════════════════════════════════════════════ -->
+  <!-- ROW 2: Session Health Table + Anomaly Score Timeline                  -->
+  <!-- ══════════════════════════════════════════════════════════════════════ -->
+  <row>
+    <panel>
+      <title>Session Health Overview</title>
+      <table>
+        <search>
+          <query>
+            index=agent_telemetry sourcetype=agent_sentinel
+                agent_id="$agent_filter$"
+            | stats
+                count                              AS total_spans,
+                sum(eval(span_type="llm_call"))    AS llm_calls,
+                sum(eval(span_type="tool_call"))   AS tool_calls,
+                avg(latency_ms)                    AS avg_latency_ms,
+                sum(eval(status="error"))          AS total_errors,
+                min(_time)                         AS session_start,
+                max(_time)                         AS session_end
+                BY session_id, agent_id
+            | eval
+                duration_s    = round(session_end - session_start, 1),
+                error_rate    = round(total_errors / total_spans, 3),
+                health_status = case(
+                    error_rate > 0.3, "🔴 critical",
+                    error_rate > 0.1, "🟡 degraded",
+                    true(),           "🟢 healthy"
+                ),
+                avg_latency_ms = round(avg_latency_ms, 0)
+            | sort -session_start
+            | table
+                session_id, agent_id, health_status,
+                llm_calls, tool_calls, avg_latency_ms,
+                total_errors, error_rate, duration_s
+          </query>
+          <earliest>$time_range.earliest$</earliest>
+          <latest>$time_range.latest$</latest>
+        </search>
+        <option name="drilldown">cell</option>
+        <option name="rowNumbers">true</option>
+        <format type="color" field="health_status">
+          <colorPalette type="map">
+            {"🔴 critical": "#dc4e41", "🟡 degraded": "#f8be34", "🟢 healthy": "#53a051"}
+          </colorPalette>
+        </format>
+        <format type="color" field="error_rate">
+          <colorPalette type="minMidMax" minColor="#53a051" midColor="#f8be34" maxColor="#dc4e41"/>
+          <scale type="minMidMax" minValue="0" midValue="0.15" maxValue="0.5"/>
+        </format>
+      </table>
+    </panel>
+
+    <panel>
+      <title>Composite Anomaly Score Over Time</title>
+      <chart>
+        <search>
+          <query>
+            index=agent_telemetry sourcetype=agent_sentinel
+                span_type=anomaly_alert agent_id="$agent_filter$"
+            | timechart
+                avg(composite_score)       AS avg_score,
+                avg(hallucination_score)   AS hallucination,
+                avg(tool_loop_score)       AS tool_loop,
+                avg(reasoning_drift_score) AS reasoning_drift
+                span=1m
+          </query>
+          <earliest>$time_range.earliest$</earliest>
+          <latest>$time_range.latest$</latest>
+        </search>
+        <option name="charting.chart">line</option>
+        <option name="charting.axisY.maximumNumber">1</option>
+        <option name="charting.axisY.minimumNumber">0</option>
+        <option name="charting.legend.placement">bottom</option>
+        <option name="charting.chart.nullValueMode">connect</option>
+        <!-- Threshold line at 0.65 (pause threshold) -->
+        <option name="charting.chart.showDataLabels">none</option>
+      </chart>
+    </panel>
+  </row>
+
+  <!-- ══════════════════════════════════════════════════════════════════════ -->
+  <!-- ROW 3: Anomaly Alert Feed + Tool Loop Detection                       -->
+  <!-- ══════════════════════════════════════════════════════════════════════ -->
+  <row>
+    <panel>
+      <title>🚨 Real-Time Anomaly Alert Feed</title>
+      <table>
+        <search>
+          <query>
+            index=agent_telemetry sourcetype=agent_sentinel
+                span_type=anomaly_alert agent_id="$agent_filter$"
+            | eval fired_at = strftime(_time, "%H:%M:%S")
+            | eval composite_score = round(composite_score, 3)
+            | sort -_time
+            | head 50
+            | table
+                fired_at, session_id, agent_id,
+                anomaly_type, composite_score,
+                hallucination_score, tool_loop_score,
+                reasoning_drift_score, recommended_action
+          </query>
+          <earliest>$time_range.earliest$</earliest>
+          <latest>$time_range.latest$</latest>
+          <refresh>15s</refresh>
+          <refreshType>delay</refreshType>
+        </search>
+        <option name="drilldown">row</option>
+        <option name="rowNumbers">true</option>
+        <format type="color" field="anomaly_type">
+          <colorPalette type="map">
+            {"hallucination": "#dc4e41", "tool_loop": "#f1813f",
+             "reasoning_drift": "#f8be34", "cascade_risk": "#708794", "low_risk": "#53a051"}
+          </colorPalette>
+        </format>
+        <format type="color" field="recommended_action">
+          <colorPalette type="map">
+            {"abort": "#dc4e41", "pause": "#f1813f", "warn": "#f8be34"}
+          </colorPalette>
+        </format>
+        <format type="color" field="composite_score">
+          <colorPalette type="minMidMax" minColor="#53a051" midColor="#f8be34" maxColor="#dc4e41"/>
+          <scale type="minMidMax" minValue="0" midValue="0.5" maxValue="1"/>
+        </format>
+      </table>
+    </panel>
+
+    <panel>
+      <title>Tool Loop Detection</title>
+      <table>
+        <search>
+          <query>
+            index=agent_telemetry sourcetype=agent_sentinel
+                span_type=tool_call agent_id="$agent_filter$"
+            | stats
+                count         AS total_calls,
+                dc(inputs)    AS unique_inputs,
+                values(status) AS statuses
+                BY session_id, agent_id, tool_name
+            | eval loop_ratio = round((total_calls - unique_inputs) / total_calls, 3)
+            | where total_calls > 2 AND loop_ratio > 0.4
+            | eval severity = case(
+                loop_ratio > 0.8, "🔴 critical",
+                loop_ratio > 0.6, "🟠 high",
+                true(),           "🟡 medium"
+              )
+            | sort -loop_ratio
+            | table session_id, agent_id, tool_name,
+                    total_calls, unique_inputs, loop_ratio, severity
+          </query>
+          <earliest>$time_range.earliest$</earliest>
+          <latest>$time_range.latest$</latest>
+          <refresh>30s</refresh>
+        </search>
+        <option name="drilldown">cell</option>
+        <format type="color" field="severity">
+          <colorPalette type="map">
+            {"🔴 critical": "#dc4e41", "🟠 high": "#f1813f", "🟡 medium": "#f8be34"}
+          </colorPalette>
+        </format>
+      </table>
+    </panel>
+  </row>
+
+  <!-- ══════════════════════════════════════════════════════════════════════ -->
+  <!-- ROW 4: Hallucination Risk + Remediation Audit                        -->
+  <!-- ══════════════════════════════════════════════════════════════════════ -->
+  <row>
+    <panel>
+      <title>Hallucination Risk by Agent (LLM Calls)</title>
+      <chart>
+        <search>
+          <query>
+            index=agent_telemetry sourcetype=agent_sentinel
+                span_type=anomaly_alert agent_id="$agent_filter$"
+            | eval risk_bucket = case(
+                hallucination_score > 0.7, "High Risk",
+                hallucination_score > 0.4, "Medium Risk",
+                true(),                    "Low Risk"
+              )
+            | stats count BY agent_id, risk_bucket
+            | chart sum(count) OVER agent_id BY risk_bucket
+          </query>
+          <earliest>$time_range.earliest$</earliest>
+          <latest>$time_range.latest$</latest>
+        </search>
+        <option name="charting.chart">bar</option>
+        <option name="charting.chart.stackMode">stacked</option>
+        <option name="charting.legend.placement">right</option>
+        <option name="charting.fieldColors">
+          {"High Risk": "#dc4e41", "Medium Risk": "#f8be34", "Low Risk": "#53a051"}
+        </option>
+      </chart>
+    </panel>
+
+    <panel>
+      <title>Remediation Audit Trail</title>
+      <table>
+        <search>
+          <query>
+            index=agent_telemetry sourcetype=agent_sentinel
+                span_type=remediation agent_id="$agent_filter$"
+            | eval actioned_at = strftime(_time, "%Y-%m-%d %H:%M:%S")
+            | eval triggered_by_score = round(triggered_by_score, 3)
+            | sort -_time
+            | head 30
+            | table
+                actioned_at, session_id, agent_id,
+                action_taken, triggered_by_score, outcome
+          </query>
+          <earliest>$time_range.earliest$</earliest>
+          <latest>$time_range.latest$</latest>
+          <refresh>30s</refresh>
+        </search>
+        <option name="drilldown">row</option>
+        <format type="color" field="action_taken">
+          <colorPalette type="map">
+            {"abort": "#dc4e41", "pause": "#f1813f", "warn": "#f8be34"}
+          </colorPalette>
+        </format>
+      </table>
+    </panel>
+  </row>
+
+  <!-- ══════════════════════════════════════════════════════════════════════ -->
+  <!-- ROW 5: Token Cost + Error Rate                                        -->
+  <!-- ══════════════════════════════════════════════════════════════════════ -->
+  <row>
+    <panel>
+      <title>Token Usage by Agent (Cost Awareness)</title>
+      <chart>
+        <search>
+          <query>
+            index=agent_telemetry sourcetype=agent_sentinel
+                span_type=llm_call agent_id="$agent_filter$"
+            | stats
+                sum(tokens_in)  AS tokens_in,
+                sum(tokens_out) AS tokens_out
+                BY agent_id
+            | eval total_tokens = tokens_in + tokens_out
+            | sort -total_tokens
+          </query>
+          <earliest>$time_range.earliest$</earliest>
+          <latest>$time_range.latest$</latest>
+        </search>
+        <option name="charting.chart">bar</option>
+        <option name="charting.chart.stackMode">stacked</option>
+        <option name="charting.fieldColors">
+          {"tokens_in": "#708794", "tokens_out": "#5cc05c"}
+        </option>
+      </chart>
+    </panel>
+
+    <panel>
+      <title>Error Rate Timeline by Agent</title>
+      <chart>
+        <search>
+          <query>
+            index=agent_telemetry sourcetype=agent_sentinel
+                (span_type=llm_call OR span_type=tool_call)
+                agent_id="$agent_filter$"
+            | eval is_error = if(status="error", 1, 0)
+            | timechart span=2m avg(is_error) AS error_rate BY agent_id
+          </query>
+          <earliest>$time_range.earliest$</earliest>
+          <latest>$time_range.latest$</latest>
+        </search>
+        <option name="charting.chart">area</option>
+        <option name="charting.chart.stackMode">default</option>
+        <option name="charting.axisY.maximumNumber">1</option>
+        <option name="charting.axisY.minimumNumber">0</option>
+        <option name="charting.legend.placement">bottom</option>
+      </chart>
+    </panel>
+  </row>
+
+</dashboard>

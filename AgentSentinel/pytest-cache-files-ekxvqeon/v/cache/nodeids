@@ -1,0 +1,3 @@
+[
+  "tests/test_scorer.py::TestCompositeScore::test_hallucinating_agent_composite_above_threshold"
+]

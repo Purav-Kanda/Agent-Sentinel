@@ -1,0 +1,95 @@
+---
+title: AgentSentinel — Agentic AI Observability for Splunk
+---
+flowchart TD
+    subgraph PRIMARY["Primary Agent Layer (monitored)"]
+        direction TB
+        SOC["SOC Triage Agent\nsoc_triage_agent.py"]
+        ANY["Any Custom Agent\n(instrumented with AgentTracer)"]
+    end
+
+    subgraph TRACER["AgentSentinel SDK — agent_sentinel/telemetry/"]
+        direction TB
+        AT["AgentTracer\ntracer.py\n@trace_llm_call  @trace_tool_call\nlog_reasoning_step()"]
+        SW["SplunkWriter / StdoutWriter\nsplunk_writer.py\nAsync HEC POST"]
+        SP["Span\nspan.py\nLLM_CALL | TOOL_CALL\nREASONING_STEP | SESSION_*"]
+        AT --> SP --> SW
+    end
+
+    subgraph SPLUNK["Splunk Platform"]
+        direction TB
+        HEC["HTTP Event Collector\n:8088/services/collector"]
+        IDX["Index: agent_telemetry\nsourcetype: agent_sentinel"]
+        SDK["Splunk Python SDK\n:8089 search API"]
+        MCP_IN["Splunk MCP Server\n(inbound — SPL via MCP)"]
+        DASH["AgentSentinel Dashboard\nagent_sentinel_dashboard.xml\nKPIs · Alert Feed · Heatmaps"]
+        HEC --> IDX
+        IDX --> SDK
+        IDX --> DASH
+    end
+
+    subgraph DETECTION["AgentSentinel Detection — agent_sentinel/detection/"]
+        direction TB
+        SCORER["AnomalyScorer\nscorer.py"]
+        H["Hallucination Score\nlinguistic patterns + latency heuristic"]
+        TL["Tool Loop Score\nretry pattern analysis"]
+        RD["Reasoning Drift Score\nJaccard similarity across steps"]
+        CR["Cascade Risk Score\nerror_rate × log(depth)"]
+        COMP["Composite Score\n0.35·H + 0.30·TL + 0.20·RD + 0.15·CR"]
+        SCORER --> H & TL & RD & CR --> COMP
+    end
+
+    subgraph REMEDIATION["AgentSentinel Remediation — agent_sentinel/remediation/"]
+        direction TB
+        MW["MetaAgentWatcher\nmeta_watcher.py\nBackground thread — polls Splunk every 10s"]
+        RH["RemediationHandler\nhandler.py"]
+        WARN["WARN  ≥0.40\nlog + ANOMALY_ALERT span"]
+        PAUSE["PAUSE ≥0.65\nhuman-in-the-loop gate"]
+        ABORT["ABORT ≥0.90\nAgentAbortError raised"]
+        MW --> SCORER
+        COMP --> RH --> WARN & PAUSE & ABORT
+    end
+
+    subgraph MCP_OUT["AgentSentinel MCP Server — mcp_server/server.py"]
+        direction TB
+        T1["list_active_sessions"]
+        T2["get_agent_health"]
+        T3["get_session_status"]
+        T4["get_recent_anomalies"]
+        T5["resume_session"]
+        T6["abort_session"]
+        T7["score_span"]
+    end
+
+    subgraph AI["AI Clients"]
+        direction TB
+        CLAUDE["Claude Desktop\n(via stdio MCP)"]
+        SAIA["Splunk AI Assistant\n(via Splunk MCP Server)"]
+    end
+
+    %% Data flow
+    PRIMARY -->|"@trace_* decorators"| TRACER
+    TRACER -->|"JSON spans → HEC"| HEC
+    SDK -->|"SPL results"| MW
+    MCP_IN -->|"SPL tool calls"| SDK
+
+    ABORT -->|"AgentAbortError"| PRIMARY
+    PAUSE -->|"is_paused() poll"| PRIMARY
+
+    MCP_OUT <-->|"stdio / SSE"| CLAUDE
+    MCP_OUT <-->|"MCP tools"| SAIA
+    MW -->|"score + act"| RH
+    WARN & PAUSE & ABORT -->|"audit spans → HEC"| HEC
+
+    %% Styling
+    classDef splunkBlue fill:#1f77b4,color:#fff,stroke:#1a5a8a
+    classDef sentinelGreen fill:#2ca02c,color:#fff,stroke:#1e7a1e
+    classDef alertRed fill:#d62728,color:#fff,stroke:#a01f1f
+    classDef aiPurple fill:#9467bd,color:#fff,stroke:#6b3d8a
+    classDef neutral fill:#636363,color:#fff,stroke:#404040
+
+    class HEC,IDX,SDK,MCP_IN,DASH splunkBlue
+    class AT,SW,SP,SCORER,H,TL,RD,CR,COMP,MW sentinelGreen
+    class WARN,PAUSE,ABORT,RH alertRed
+    class CLAUDE,SAIA,T1,T2,T3,T4,T5,T6,T7 aiPurple
+    class SOC,ANY neutral
