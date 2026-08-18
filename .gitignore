@@ -7,3 +7,8 @@ pytest-cache-files*/
 *.png
 *.jpg
 .env
+__pycache__/
+*.pyc
+*.pyo
+.pytest_cache/
+pytest-cache-files-*/
